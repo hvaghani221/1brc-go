@@ -25,7 +25,7 @@ func findActualOutput(t *testing.T, path string) []byte {
 }
 
 func TestProcessor(t *testing.T) {
-	paths, err := filepath.Glob(samplePath + "*-3.txt")
+	paths, err := filepath.Glob(samplePath + "*.txt")
 	if err != nil {
 		assert.Fail(t, err.Error())
 		return
@@ -36,15 +36,13 @@ func TestProcessor(t *testing.T) {
 			file, err := os.Open(path)
 			require.NoError(t, err)
 
-			p := New()
-			require.NoError(t, p.parseInput(file))
-
-			op := findActualOutput(t, path)
 			var b bytes.Buffer
-			p.printResult(&b)
+			op := findActualOutput(t, path)
+
+			result := processFile(file)
+			printResult(&b, result)
 
 			require.NoError(t, err)
-
 			assert.Equal(t, op, b.Bytes())
 		})
 	}
