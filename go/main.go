@@ -7,7 +7,6 @@ import (
 	"os"
 	"runtime"
 	"sort"
-	"strconv"
 	"sync"
 	"time"
 )
@@ -19,15 +18,18 @@ var (
 	queueSize   int = workerCount * multiplier
 )
 
-const bufferSize = 1024 * 1024
+const bufferSize = 1024 * 256
 
 type entry struct {
-	min, max, total float64
-	count           int64
+	min, max, total, count int64
 }
 
 func (e entry) print(name string) string {
-	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", name, e.min, e.total/float64(e.count), e.max)
+	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", name, toFloat(e.min), toFloat(e.total)/float64(e.count), toFloat(e.max))
+}
+
+func toFloat(n int64) float64 {
+	return float64(n) / 10.0
 }
 
 func main() {
@@ -113,7 +115,7 @@ func processFile(file *os.File) map[string]*entry {
 	}
 	close(queue)
 	wg.Wait()
-	// fmt.Fprintf(os.Stderr, "\r")
+	fmt.Fprintf(os.Stderr, "\r")
 
 	finalResult := make(map[string]*entry, 1000)
 
@@ -153,13 +155,30 @@ func processChunk(chunk []byte, result map[string]*entry) {
 		name := string(chunk[0:i])
 		chunk = chunk[i+1:]
 		i = 0
+		var number int64
+		{
+			negative := false
+			if chunk[i] == '-' {
+				negative = true
+				chunk = chunk[1:]
+			}
 
-		newLineIndex := bytes.IndexByte(chunk, '\n')
-		number, err := strconv.ParseFloat(string(chunk[0:newLineIndex]), 64)
-		if err != nil {
-			panic(err)
+			if chunk[1] == '.' {
+				// 1.2\n
+				number = int64(chunk[0])*10 + int64(chunk[2]) - '0'*(10+1)
+				chunk = chunk[4:]
+			} else if chunk[2] == '.' {
+				// 12.3\n
+				number = int64(chunk[0])*100 + int64(chunk[1])*10 + int64(chunk[3]) - '0'*(100+10+1)
+				chunk = chunk[5:]
+			} else {
+				panic("unexpected position: " + string(chunk[0:100]))
+			}
+
+			if negative {
+				number = -number
+			}
 		}
-		chunk = chunk[newLineIndex+1:]
 
 		e := result[name]
 		if e == nil {
@@ -209,3 +228,4 @@ func putBuffer(buffer []byte) {
 	buffer = buffer[:0]
 	bufferPool <- buffer
 }
+
