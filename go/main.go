@@ -20,12 +20,12 @@ var (
 
 const bufferSize = 1024 * 256
 
-type entry struct {
+type measurement struct {
 	min, max, total, count int64
 }
 
-func (e entry) print(name string) string {
-	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", name, toFloat(e.min), toFloat(e.total)/float64(e.count), toFloat(e.max))
+func (m measurement) print(name string) string {
+	return fmt.Sprintf("%s=%.1f/%.1f/%.1f", name, toFloat(m.min), toFloat(m.total)/float64(m.count), toFloat(m.max))
 }
 
 func toFloat(n int64) float64 {
@@ -61,7 +61,7 @@ func main() {
 	printResult(os.Stdout, result)
 }
 
-func processFile(file *os.File) map[string]*entry {
+func processFile(file *os.File) map[string]*measurement {
 	startTime := time.Now()
 	stat, err := file.Stat()
 	if err != nil {
@@ -75,7 +75,7 @@ func processFile(file *os.File) map[string]*entry {
 	var wg sync.WaitGroup
 
 	queue := make(chan []byte, workerCount*multiplier)
-	result := make([]map[string]*entry, workerCount)
+	result := make([]*hashmap, workerCount)
 
 	wg.Add(workerCount)
 	for i := 0; i < workerCount; i++ {
@@ -115,44 +115,46 @@ func processFile(file *os.File) map[string]*entry {
 	}
 	close(queue)
 	wg.Wait()
-	fmt.Fprintf(os.Stderr, "\r")
+	// fmt.Fprintf(os.Stderr, "\r")
 
-	finalResult := make(map[string]*entry, 1000)
+	finalResult := make(map[string]*measurement, 1000)
 
 	for i := 0; i < workerCount; i++ {
-		for k, v := range result[i] {
-			if e := finalResult[k]; e == nil {
-				finalResult[k] = v
+		for j, entry := range result[i].values {
+			name := string(result[i].name[j])
+			if e := finalResult[name]; e == nil {
+				entry := entry
+				finalResult[name] = &entry
 			} else {
-				e.min = min(e.min, v.min)
-				e.max = max(e.max, v.max)
-				e.count += v.count
-				e.total += v.total
+				e.min = min(e.min, entry.min)
+				e.max = max(e.max, entry.max)
+				e.count += entry.count
+				e.total += entry.total
 			}
 		}
 	}
 
 	return finalResult
-
 }
 
-func processQueue(queue chan []byte) map[string]*entry {
-	result := make(map[string]*entry, 10000)
+func processQueue(queue chan []byte) *hashmap {
+	hashmap := newHashmap(1 << 12)
 	for buffer := range queue {
-		processChunk(buffer, result)
+		processChunk(buffer, hashmap)
 		go putBuffer(buffer)
 	}
 
-	return result
+	return hashmap
 }
 
-func processChunk(chunk []byte, result map[string]*entry) {
+func processChunk(chunk []byte, hashmap *hashmap) {
 	for len(chunk) > 0 {
 		i := 0
 		for chunk[i] != ';' {
 			i += 1
 		}
-		name := string(chunk[0:i])
+		name := chunk[0:i]
+		hash := fnv1a(name)
 		chunk = chunk[i+1:]
 		i = 0
 		var number int64
@@ -180,15 +182,16 @@ func processChunk(chunk []byte, result map[string]*entry) {
 			}
 		}
 
-		e := result[name]
-		if e == nil {
-			e = &entry{
+		// e := result[name]
+		if _, e := hashmap.get(hash); e == nil {
+			e := measurement{
 				min:   number,
 				max:   number,
 				total: number,
 				count: 1,
 			}
-			result[name] = e
+			// result[name] = e
+			hashmap.add(hash, name, e)
 		} else {
 			e.count += 1
 			e.total += number
@@ -199,7 +202,22 @@ func processChunk(chunk []byte, result map[string]*entry) {
 	}
 }
 
-func printResult(w io.Writer, result map[string]*entry) {
+const (
+	FNVPrime    uint64 = 1099511628211
+	OffsetBasis uint64 = 14695981039346656037
+)
+
+func fnv1a(name []byte) uint64 {
+	hash := OffsetBasis
+	for _, b := range name {
+		hash ^= uint64(b)
+		hash *= FNVPrime
+	}
+
+	return hash
+}
+
+func printResult(w io.Writer, result map[string]*measurement) {
 	names := make([]string, 0, len(result))
 	for name := range result {
 		names = append(names, name)
@@ -229,3 +247,52 @@ func putBuffer(buffer []byte) {
 	bufferPool <- buffer
 }
 
+type hashentry struct {
+	key   uint64
+	index int64
+}
+type hashmap struct {
+	table  [][]hashentry
+	name   [][]byte
+	values []measurement
+	size   int
+}
+
+func newHashmap(size int) *hashmap {
+	return &hashmap{
+		table:  make([][]hashentry, size),
+		name:   make([][]byte, 0, size*4),
+		values: make([]measurement, 0, size*4),
+		size:   size,
+	}
+}
+
+func (h *hashmap) add(key uint64, name []byte, value measurement) {
+	i := key & uint64(h.size-1)
+
+	if h.table[i] == nil {
+		h.table[i] = make([]hashentry, 0, 16)
+	}
+
+	h.table[i] = append(h.table[i], hashentry{
+		key:   key,
+		index: int64(len(h.values)),
+	})
+
+	nameCopy := make([]byte, len(name))
+	copy(nameCopy, name)
+
+	h.name = append(h.name, nameCopy)
+	h.values = append(h.values, value)
+}
+
+func (h *hashmap) get(key uint64) ([]byte, *measurement) {
+	i := key & uint64(h.size-1)
+
+	for _, e := range h.table[i] {
+		if e.key == key {
+			return h.name[e.index], &h.values[e.index]
+		}
+	}
+	return nil, nil
+}
